@@ -16,6 +16,21 @@ else:
     range = xrange
 
 
+'''
+mods for local testing (no db, in memory, biggish indices)
+- expanded obj_id structure (id + text)
+- remove logging/modify logging (this is more to do with
+  ipy/jupyter memory issues than anything else)
+- mapreduce the near_dupe checks (again, memory thing and
+  log thing)
+- add the distance score for sorting, curiosity
+
+no changes to the actual hashing algorithm, fyi.
+
+b-cube, 2015
+'''
+
+
 class Simhash(object):
     def __init__(self, value, f=64, reg=r'[\w\u4e00-\u9fcc]+', hashfunc=None):
         """
@@ -95,11 +110,20 @@ class SimhashIndex(object):
     def get_near_dups(self, simhash):
         """
         `simhash` is an instance of Simhash
-        return a list of obj_id, which is in type of str
+        return a list of objs and the distance, which is in type of str
         """
         assert simhash.f == self.f
 
         ans = set()
+
+        # now we need to build the index as smaller blocks
+        # we're going to pool the thing
+        self.bucket = {}
+        for i, q in enumerate(objs):
+            # if i % 10000 == 0 or i == count - 1:
+            #     logging.info('%s/%s', i + 1, count)
+
+            self.add(*q)
 
         for key in self.get_keys(simhash):
             dups = self.bucket.get(key, set())
@@ -108,28 +132,31 @@ class SimhashIndex(object):
                 logging.warning('Big bucket found. key:%s, len:%s', key, len(dups))
 
             for dup in dups:
-                sim2, obj_id = dup.split(',', 1)
+                sim2, obj_blob = dup.split(',', 1)
                 sim2 = Simhash(long(sim2, 16), self.f)
 
                 d = simhash.distance(sim2)
                 if d <= self.k:
-                    ans.add(obj_id)
+                    ans.add((obj_blob, d))
         return list(ans)
 
-    def add(self, obj_id, simhash):
+    def add(self, obj_id, obj_descriptors, simhash):
         """
-        `obj_id` is a string
+        `obj_id` is a string for some identifier
+        `obj_descriptors` is a string array for storing odd bits
+            of info related (not huge but the original text, filename,
+            things like that) because this will have some cost associated
         `simhash` is an instance of Simhash
         """
         assert simhash.f == self.f
 
         for key in self.get_keys(simhash):
-            v = '%x,%s' % (simhash.value, obj_id)
+            v = '%x,%s|%s' % (simhash.value, obj_id, ';'.join(obj_descriptors))
 
             self.bucket.setdefault(key, set())
             self.bucket[key].add(v)
 
-    def delete(self, obj_id, simhash):
+    def delete(self, obj_id, obj_descriptors, simhash):
         """
         `obj_id` is a string
         `simhash` is an instance of Simhash
@@ -137,7 +164,7 @@ class SimhashIndex(object):
         assert simhash.f == self.f
 
         for key in self.get_keys(simhash):
-            v = '%x,%s' % (simhash.value, obj_id)
+            v = '%x,%s|%s' % (simhash.value, obj_id, ';'.join(obj_descriptors))
 
             if v in self.bucket.get(key, set()):
                 self.bucket[key].remove(v)
@@ -154,24 +181,21 @@ class SimhashIndex(object):
         count = len(objs)
         logging.info('Initializing %s data.', count)
 
-        self.bucket = {}
-
-        for i, q in enumerate(objs):
-            if i % 10000 == 0 or i == count - 1:
-                logging.info('%s/%s', i + 1, count)
-
-            self.add(*q)
+        # don't initialize the bucket, just store the list
+        self.store = objs
 
     @property
     def offsets(self):
         """
-        You may optimize this method according to <http://www.wwwconference.org/www2007/papers/paper215.pdf>
+        You may optimize this method according to
+        <http://www.wwwconference.org/www2007/papers/paper215.pdf>
         """
         return [self.f // (self.k + 1) * i for i in range(self.k + 1)]
 
     def get_keys(self, simhash):
         for i, offset in enumerate(self.offsets):
-            m = (i == len(self.offsets) - 1 and 2 ** (self.f - offset) - 1 or 2 ** (self.offsets[i + 1] - offset) - 1)
+            m = (i == len(self.offsets) - 1 and 2 ** (self.f - offset) - 1 or
+                 2 ** (self.offsets[i + 1] - offset) - 1)
             c = simhash.value >> offset & m
             yield '%x:%x' % (c, i)
 
